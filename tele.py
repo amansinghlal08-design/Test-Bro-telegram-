@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Professional Exam Practice Bot with High-Converting Welcome UI & In-App T&C
+Professional Exam Practice Bot - Render 24/7 Deployment Edition
 Language: English
 """
 
@@ -9,8 +9,11 @@ import base64
 import json
 import logging
 import os
+import threading
 import zlib
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -27,9 +30,13 @@ from telegram.ext import (
 )
 
 # ================== CONFIGURATION ==================
-BOT_TOKEN = "8983460519:AAGGOuXtOsPktEvtkWWT1LKpovNox5R73Hk"
-ADMIN_ID = 1429768597
-MINI_APP_URL = "https://ssctest.freebuff.app"
+# अपना बॉट टोकन, एडमिन आईडी और मिनी ऐप लिंक यहाँ डालें:
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8983460519:AAGGOuXtOsPktEvtkWWT1LKpovNox5R73Hk)
+ADMIN_ID = int(os.getenv("ADMIN_ID", "1429768597"))
+MINI_APP_URL = os.getenv("MINI_APP_URL", "https://ssctest.freebuff.app")
+
+# Render Web Service Port (Render ऑटोमैटिकली PORT एनवायरनमेंट प्रोवाइड करता है)
+PORT = int(os.getenv("PORT", 8080))
 DB_FILE = "bot_database.json"
 # ===================================================
 
@@ -39,6 +46,25 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+
+# ================== RENDER DUMMY WEB SERVER ==================
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot Server is Live 24/7!")
+
+    def log_message(self, format, *args):
+        return  # कंसोल साफ रखने के लिए साइलेंट लॉग
+
+
+def start_health_check_server():
+    """Starts background HTTP server for Render port binding & UptimeRobot pings."""
+    server = HTTPServer(("0.0.0.0", PORT), HealthCheckHandler)
+    logger.info(f"Health-Check HTTP server running on port {PORT}")
+    server.serve_forever()
 
 
 # ================== ENCRYPTED T&C STORAGE ==================
@@ -126,7 +152,6 @@ def is_banned(user_id: int) -> bool:
 
 # ================== UI BUILDERS ==================
 def get_welcome_text(user_name: str) -> str:
-    """Builds an attractive, modern, high-engagement welcome message."""
     return (
         f"👋 **Hey {user_name}!** Welcome to **ExamPrep Arena** 🚀\n\n"
         f"⚡ *Your Ultimate Destination for Smart Practice & High-Score Prep!*\n\n"
@@ -172,7 +197,7 @@ async def post_init_setup(application: Application):
         web_app=WebAppInfo(url=MINI_APP_URL)
     )
     await application.bot.set_chat_menu_button(menu_button=menu_btn)
-    logger.info("Bot commands and WebApp menu button initialized.")
+    logger.info("Bot commands and WebApp menu button configured.")
 
 
 # ================== USER HANDLERS ==================
@@ -180,12 +205,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db = load_db()
 
-    # 1. Ban Check
     if is_banned(user.id):
         await update.message.reply_text("🚫 **Access Denied:** You have been banned from using this bot.")
         return
 
-    # 2. Register / Update User
     is_new = register_or_update_user(user)
 
     if is_new and user.id != ADMIN_ID:
@@ -203,16 +226,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # 3. Maintenance Check
     if db.get("maintenance", False) and user.id != ADMIN_ID:
         await update.message.reply_text(
             "🛠️ **Maintenance in Progress**\n\n"
-            "We are currently rolling out new test sets and updates. Please check back shortly!",
+            "We are currently rolling out new test sets. Please check back shortly!",
             parse_mode="Markdown"
         )
         return
 
-    # 4. Render Attractive Welcome UI
     user_name = user.first_name if user.first_name else "Aspirant"
     await update.message.reply_text(
         text=get_welcome_text(user_name),
@@ -252,7 +273,7 @@ async def terms_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ================== CALLBACK HANDLER ==================
+# ================== CALLBACK HANDLER (IN-APP T&C) ==================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -261,9 +282,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "view_terms":
         terms_text = get_decrypted_terms()
-        keyboard = [
-            [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_welcome")]
-        ]
+        keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_welcome")]]
         await query.edit_message_text(
             text=terms_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -384,7 +403,7 @@ async def admin_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.message.reply_text(
             "⚠️ **Usage:** `/dm <user_id> <message>`\n\n"
-            "Example:\n`/dm 123456789 Hello, check your updated score.`",
+            "Example:\n`/dm 123456789 Hello, your test score has been updated.`",
             parse_mode="Markdown"
         )
         return
@@ -514,6 +533,11 @@ async def admin_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== MAIN APP RUNNER ==================
 def main():
+    # 1. Background HTTP Server for Render
+    server_thread = threading.Thread(target=start_health_check_server, daemon=True)
+    server_thread.start()
+
+    # 2. Telegram Bot Polling Setup
     app = Application.builder().token(BOT_TOKEN).post_init(post_init_setup).build()
 
     # User Handlers
@@ -521,7 +545,7 @@ def main():
     app.add_handler(CommandHandler("test", test_command))
     app.add_handler(CommandHandler("terms", terms_command))
 
-    # Inline Callback Query Handler (T&C and Back Button)
+    # In-App Callback Handler
     app.add_handler(CallbackQueryHandler(callback_handler, pattern="^(view_terms|back_to_welcome)$"))
 
     # Admin Handlers
@@ -535,10 +559,9 @@ def main():
     app.add_handler(CommandHandler("user", admin_user_info))
     app.add_handler(CommandHandler("maintenance", admin_maintenance))
 
-    print("🤖 Exam Practice Bot is running with the new engaging UI...")
+    print("🤖 Exam Practice Bot is now polling & running on Render...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
     main()
-
