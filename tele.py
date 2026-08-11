@@ -33,7 +33,7 @@ from telegram.ext import (
 # अपना बॉट टोकन, एडमिन आईडी और मिनी ऐप लिंक यहाँ डालें:
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8983460519:AAGGOuXtOsPktEvtkWWT1LKpovNox5R73Hk")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1429768597"))
-MINI_APP_URL = os.getenv("MINI_APP_URL", "https://ssctest.freebuff.app")
+MINI_APP_URL = os.getenv("MINI_APP_URL", "https://mocktest-pro-lknw.onrender.com/")
 
 # Render Web Service Port (Render ऑटोमैटिकली PORT एनवायरनमेंट प्रोवाइड करता है)
 PORT = int(os.getenv("PORT", 8080))
