@@ -31,7 +31,7 @@ from telegram.ext import (
 
 # ================== CONFIGURATION ==================
 # अपना बॉट टोकन, एडमिन आईडी और मिनी ऐप लिंक यहाँ डालें:
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8983460519:AAGGOuXtOsPktEvtkWWT1LKpovNox5R73Hk)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8983460519:AAGGOuXtOsPktEvtkWWT1LKpovNox5R73Hk")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1429768597"))
 MINI_APP_URL = os.getenv("MINI_APP_URL", "https://ssctest.freebuff.app")
 
