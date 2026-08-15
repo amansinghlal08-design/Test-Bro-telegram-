@@ -16,7 +16,7 @@ Single-file Telegram bot engine featuring:
 Run:
     export BOT_TOKEN="..."          # required, from @BotFather
     export ADMIN_ID="..."           # required, your Telegram user id
-    python exam_prep_bot.py
+    python tele.py
 """
 
 import asyncio
