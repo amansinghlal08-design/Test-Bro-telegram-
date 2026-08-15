@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Professional Exam Practice Bot - Render 24/7 Deployment Edition
-Fixed: Markdown Parsing Crashes for Non-Admin Users
-Language: English
+Fixed: Catch-All Handlers, Full HTML Rendering, & Crash-Proof Try-Excepts
 """
 
 import asyncio
@@ -28,6 +27,8 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
+    filters,
     ContextTypes
 )
 
@@ -90,13 +91,15 @@ ENCODED_TC_PAYLOAD = (
 
 def get_decrypted_terms() -> str:
     try:
-        return zlib.decompress(base64.b64decode(ENCODED_TC_PAYLOAD)).decode('utf-8')
+        raw_text = zlib.decompress(base64.b64decode(ENCODED_TC_PAYLOAD)).decode('utf-8')
+        # Replace asterisks with HTML bold tags to prevent markdown crashes
+        return raw_text.replace('*', '<b>').replace('</b>\n', '</b>\n')
     except Exception:
         return (
-            "📜 *Terms and Conditions (User Agreement)*\n\n"
-            "• *Educational Purpose:* Developed strictly for mock test and self-study practice.\n"
-            "• *Disclaimer:* The creator holds no liability for test score errors or technical glitches.\n"
-            "• *Conduct:* Spamming or automated exploitation will lead to an immediate ban."
+            "📜 <b>Terms and Conditions (User Agreement)</b>\n\n"
+            "• <b>Educational Purpose:</b> Developed strictly for mock test and self-study practice.\n"
+            "• <b>Disclaimer:</b> The creator holds no liability for test score errors or technical glitches.\n"
+            "• <b>Conduct:</b> Spamming or automated exploitation will lead to an immediate ban."
         )
 
 
@@ -195,7 +198,6 @@ async def post_init_setup(application: Application):
     ]
     await application.bot.set_my_commands(commands)
 
-    # Left-side chat bar WebApp Menu Button
     menu_btn = MenuButtonWebApp(
         text="🚀 Open Arena",
         web_app=WebAppInfo(url=MINI_APP_URL)
@@ -204,63 +206,80 @@ async def post_init_setup(application: Application):
     logger.info("Bot commands and WebApp menu button configured.")
 
 
-# ================== USER HANDLERS ==================
+# ================== CORE USER HANDLERS ==================
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    db = load_db()
+    try:
+        user = update.effective_user
+        db = load_db()
 
-    if is_banned(user.id):
-        await update.message.reply_text("🚫 <b>Access Denied:</b> You have been banned from using this bot.", parse_mode="HTML")
-        return
+        # 1. Ban Check
+        if is_banned(user.id):
+            await update.message.reply_text("🚫 <b>Access Denied:</b> You have been banned from using this bot.", parse_mode="HTML")
+            return
 
-    is_new = register_or_update_user(user)
+        # 2. Register User
+        is_new = register_or_update_user(user)
 
-    # Safe Admin Notification (HTML Escaped)
-    if is_new and user.id != ADMIN_ID:
-        try:
-            safe_fname = html.escape(user.first_name or "N/A")
-            safe_uname = html.escape(user.username or "N/A")
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=(
-                    f"🔔 <b>New Aspirant Joined!</b>\n"
-                    f"👤 <b>Name:</b> {safe_fname}\n"
-                    f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
-                    f"🔗 <b>Username:</b> @{safe_uname}"
-                ),
+        # 3. Notify Admin safely
+        if is_new and user.id != ADMIN_ID:
+            try:
+                safe_fname = html.escape(user.first_name or "N/A")
+                safe_uname = html.escape(user.username or "N/A")
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=(
+                        f"🔔 <b>New Aspirant Joined!</b>\n"
+                        f"👤 <b>Name:</b> {safe_fname}\n"
+                        f"🆔 <b>User ID:</b> <code>{user.id}</code>\n"
+                        f"🔗 <b>Username:</b> @{safe_uname}"
+                    ),
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify admin: {e}")
+
+        # 4. Maintenance Check
+        if db.get("maintenance", False) and user.id != ADMIN_ID:
+            await update.message.reply_text(
+                "🛠️ <b>Maintenance in Progress</b>\n\nWe are currently rolling out new test sets. Please check back shortly!",
                 parse_mode="HTML"
             )
-        except Exception as e:
-            logger.error(f"Failed to notify admin: {e}")
+            return
 
-    if db.get("maintenance", False) and user.id != ADMIN_ID:
+        # 5. Render Message
+        user_name = user.first_name if user.first_name else "Aspirant"
         await update.message.reply_text(
-            "🛠️ <b>Maintenance in Progress</b>\n\n"
-            "We are currently rolling out new test sets. Please check back shortly!",
+            text=get_welcome_text(user_name),
+            reply_markup=get_welcome_markup(),
             parse_mode="HTML"
         )
-        return
+    except Exception as e:
+        # If anything crashes, show the error to the user immediately
+        logger.error(f"Error in start_command: {e}")
+        await update.message.reply_text(f"⚠️ <b>System Error:</b> <code>{html.escape(str(e))}</code>\nPlease contact Admin.", parse_mode="HTML")
 
-    user_name = user.first_name if user.first_name else "Aspirant"
-    await update.message.reply_text(
-        text=get_welcome_text(user_name),
-        reply_markup=get_welcome_markup(),
-        parse_mode="HTML"  # <-- FIX: Changed from Markdown to HTML
-    )
+
+async def catch_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """If a user types 'Hi', sends a sticker, or anything else, this triggers the Welcome Menu."""
+    if update.effective_message:
+        await start_command(update, context)
 
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if is_banned(user.id):
-        await update.message.reply_text("🚫 <b>Access Denied:</b> You have been banned.", parse_mode="HTML")
-        return
+    try:
+        user = update.effective_user
+        if is_banned(user.id):
+            await update.message.reply_text("🚫 <b>Access Denied:</b> You have been banned.", parse_mode="HTML")
+            return
 
-    keyboard = [[InlineKeyboardButton(text="🚀 Launch Test Arena", web_app=WebAppInfo(url=MINI_APP_URL))]]
-    await update.message.reply_text(
-        "📝 <b>Click below to launch your practice session:</b>",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"
-    )
+        keyboard = [[InlineKeyboardButton(text="🚀 Launch Test Arena", web_app=WebAppInfo(url=MINI_APP_URL))]]
+        await update.message.reply_text(
+            "📝 <b>Click below to launch your practice session:</b>",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
 
 
 async def terms_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -269,36 +288,39 @@ async def terms_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         text=terms_text,
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"  # T&C uses safe static Markdown, so this is fine
+        parse_mode="HTML"  # Now uses HTML tags dynamically
     )
 
 
 # ================== CALLBACK HANDLER ==================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-    user = update.effective_user
+    try:
+        query = update.callback_query
+        await query.answer()
+        data = query.data
+        user = update.effective_user
 
-    if data == "view_terms":
-        terms_text = get_decrypted_terms()
-        keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_welcome")]]
-        await query.edit_message_text(
-            text=terms_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
+        if data == "view_terms":
+            terms_text = get_decrypted_terms()
+            keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="back_to_welcome")]]
+            await query.edit_message_text(
+                text=terms_text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
+            )
 
-    elif data == "back_to_welcome":
-        user_name = user.first_name if user.first_name else "Aspirant"
-        await query.edit_message_text(
-            text=get_welcome_text(user_name),
-            reply_markup=get_welcome_markup(),
-            parse_mode="HTML" # <-- FIX
-        )
+        elif data == "back_to_welcome":
+            user_name = user.first_name if user.first_name else "Aspirant"
+            await query.edit_message_text(
+                text=get_welcome_text(user_name),
+                reply_markup=get_welcome_markup(),
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logger.error(f"Callback error: {e}")
 
 
-# ================== ADMIN HANDLERS (HTML SECURED) ==================
+# ================== ADMIN HANDLERS ==================
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     panel_text = (
@@ -358,13 +380,11 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for uid in users.keys():
         try:
-            # Broadcasts support HTML formatting safely
             await context.bot.send_message(chat_id=int(uid), text=broadcast_msg, parse_mode="HTML")
             success += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            err_str = str(e).lower()
-            if "blocked" in err_str or "chat not found" in err_str or "user is deactivated" in err_str:
+            if "blocked" in str(e).lower() or "not found" in str(e).lower() or "deactivated" in str(e).lower():
                 blocked += 1
             else:
                 failed += 1
@@ -502,6 +522,9 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("test", test_command))
     app.add_handler(CommandHandler("terms", terms_command))
+
+    # Catch-all Handler (For "Hi", "Hello", Stickers, etc.)
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, catch_all_messages))
 
     # Inline Callback Query Handler
     app.add_handler(CallbackQueryHandler(callback_handler, pattern="^(view_terms|back_to_welcome)$"))
