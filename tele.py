@@ -16,7 +16,7 @@ Single-file Telegram bot engine featuring:
 Run:
     export BOT_TOKEN="..."          # required, from @BotFather
     export ADMIN_ID="..."           # required, your Telegram user id
-    python tele.py
+    python exam_prep_bot.py
 """
 
 import asyncio
@@ -53,8 +53,8 @@ from telegram.ext import (
 )
 
 # ================== SYSTEM CONFIGURATION ==================
-BOT_TOKEN = os.getenv("8983460519:AAGGOuXtOsPktEvtkWWT1LKpovNox5R73Hk", "")
-ADMIN_ID = int(os.getenv("1429768597", "0") or 0)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8983460519:AAGGOuXtOsPktEvtkWWT1LKpovNox5R73Hk")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "1429768597") or 0)
 DEFAULT_MINI_APP_URL = os.getenv(
     "MINI_APP_URL", "https://mocktest-pro-lknw.onrender.com/"
 )
