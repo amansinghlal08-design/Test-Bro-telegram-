@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Professional Exam Practice Bot - Render 24/7 Deployment Edition
-Fixed: Catch-All Handlers, Full HTML Rendering, & Crash-Proof Try-Excepts
+Fixed: JSON Race Conditions (Locking) & Safe Message Delivery
 """
 
 import asyncio
@@ -49,6 +49,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 🔒 Database Lock to prevent file corruption when multiple users text at the same time
+db_lock = threading.Lock()
+
 
 # ================== RENDER DUMMY WEB SERVER ==================
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -92,7 +95,6 @@ ENCODED_TC_PAYLOAD = (
 def get_decrypted_terms() -> str:
     try:
         raw_text = zlib.decompress(base64.b64decode(ENCODED_TC_PAYLOAD)).decode('utf-8')
-        # Replace asterisks with HTML bold tags to prevent markdown crashes
         return raw_text.replace('*', '<b>').replace('</b>\n', '</b>\n')
     except Exception:
         return (
@@ -103,28 +105,36 @@ def get_decrypted_terms() -> str:
         )
 
 
-# ================== DATABASE MANAGEMENT ==================
+# ================== DATABASE MANAGEMENT (THREAD-SAFE) ==================
 def load_db() -> dict:
     default_structure = {"users": {}, "banned_users": {}, "maintenance": False}
     if not os.path.exists(DB_FILE):
         return default_structure
-    try:
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if "users" not in data: data["users"] = {}
-            if "banned_users" not in data: data["banned_users"] = {}
-            return data
-    except Exception as e:
-        logger.error(f"Error reading database: {e}")
-        return default_structure
+    
+    with db_lock:
+        try:
+            with open(DB_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                # अगर फाइल क्रैश की वजह से ब्लैंक हो गई है, तो डिफ़ॉल्ट डेटा रिटर्न करो
+                if not content:
+                    return default_structure
+                
+                data = json.loads(content)
+                if "users" not in data: data["users"] = {}
+                if "banned_users" not in data: data["banned_users"] = {}
+                return data
+        except Exception as e:
+            logger.error(f"Error reading database: {e}")
+            return default_structure
 
 
 def save_db(data: dict):
-    try:
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"Error saving database: {e}")
+    with db_lock:
+        try:
+            with open(DB_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Error saving database: {e}")
 
 
 def register_or_update_user(user) -> bool:
@@ -210,11 +220,12 @@ async def post_init_setup(application: Application):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = update.effective_user
+        chat_id = update.effective_chat.id
         db = load_db()
 
         # 1. Ban Check
         if is_banned(user.id):
-            await update.message.reply_text("🚫 <b>Access Denied:</b> You have been banned from using this bot.", parse_mode="HTML")
+            await context.bot.send_message(chat_id=chat_id, text="🚫 <b>Access Denied:</b> You have been banned from using this bot.", parse_mode="HTML")
             return
 
         # 2. Register User
@@ -240,23 +251,23 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 4. Maintenance Check
         if db.get("maintenance", False) and user.id != ADMIN_ID:
-            await update.message.reply_text(
-                "🛠️ <b>Maintenance in Progress</b>\n\nWe are currently rolling out new test sets. Please check back shortly!",
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="🛠️ <b>Maintenance in Progress</b>\n\nWe are currently rolling out new test sets. Please check back shortly!",
                 parse_mode="HTML"
             )
             return
 
-        # 5. Render Message
+        # 5. Render Message (Safe send_message method)
         user_name = user.first_name if user.first_name else "Aspirant"
-        await update.message.reply_text(
+        await context.bot.send_message(
+            chat_id=chat_id,
             text=get_welcome_text(user_name),
             reply_markup=get_welcome_markup(),
             parse_mode="HTML"
         )
     except Exception as e:
-        # If anything crashes, show the error to the user immediately
         logger.error(f"Error in start_command: {e}")
-        await update.message.reply_text(f"⚠️ <b>System Error:</b> <code>{html.escape(str(e))}</code>\nPlease contact Admin.", parse_mode="HTML")
 
 
 async def catch_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -268,27 +279,30 @@ async def catch_all_messages(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user = update.effective_user
+        chat_id = update.effective_chat.id
         if is_banned(user.id):
-            await update.message.reply_text("🚫 <b>Access Denied:</b> You have been banned.", parse_mode="HTML")
+            await context.bot.send_message(chat_id=chat_id, text="🚫 <b>Access Denied:</b> You have been banned.", parse_mode="HTML")
             return
 
         keyboard = [[InlineKeyboardButton(text="🚀 Launch Test Arena", web_app=WebAppInfo(url=MINI_APP_URL))]]
-        await update.message.reply_text(
-            "📝 <b>Click below to launch your practice session:</b>",
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="📝 <b>Click below to launch your practice session:</b>",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="HTML"
         )
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Error: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        logger.error(f"Test command error: {e}")
 
 
 async def terms_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     terms_text = get_decrypted_terms()
     keyboard = [[InlineKeyboardButton("🔙 Back to Arena", callback_data="back_to_welcome")]]
-    await update.message.reply_text(
+    await context.bot.send_message(
+        chat_id=update.effective_chat.id,
         text=terms_text,
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="HTML"  # Now uses HTML tags dynamically
+        parse_mode="HTML"
     )
 
 
@@ -337,7 +351,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• <code>/banned</code> — List all banned users.\n"
         "• <code>/maintenance on/off</code> — Toggle maintenance mode."
     )
-    await update.message.reply_text(panel_text, parse_mode="HTML")
+    await update.effective_message.reply_text(panel_text, parse_mode="HTML")
 
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -362,20 +376,20 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_seen = uinfo.get("last_active", uinfo.get("joined_at", "N/A"))
         stats_msg += f"• <code>{uid}</code> | {u_name} (@{u_handle}) | 🕒 <code>{last_seen}</code>\n"
 
-    await update.message.reply_text(stats_msg, parse_mode="HTML")
+    await update.effective_message.reply_text(stats_msg, parse_mode="HTML")
 
 
 async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     if not context.args:
-        await update.message.reply_text("⚠️ <b>Usage:</b> <code>/broadcast &lt;message&gt;</code>", parse_mode="HTML")
+        await update.effective_message.reply_text("⚠️ <b>Usage:</b> <code>/broadcast &lt;message&gt;</code>", parse_mode="HTML")
         return
 
-    broadcast_msg = update.message.text.split(None, 1)[1]
+    broadcast_msg = update.effective_message.text.split(None, 1)[1]
     db = load_db()
     users = db.get("users", {})
 
-    status_msg = await update.message.reply_text(f"⏳ <b>Broadcasting started...</b>\nTarget Users: <code>{len(users)}</code>", parse_mode="HTML")
+    status_msg = await update.effective_message.reply_text(f"⏳ <b>Broadcasting started...</b>\nTarget Users: <code>{len(users)}</code>", parse_mode="HTML")
     success, blocked, failed = 0, 0, 0
 
     for uid in users.keys():
@@ -384,7 +398,8 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             success += 1
             await asyncio.sleep(0.05)
         except Exception as e:
-            if "blocked" in str(e).lower() or "not found" in str(e).lower() or "deactivated" in str(e).lower():
+            err_str = str(e).lower()
+            if "blocked" in err_str or "chat not found" in err_str or "user is deactivated" in err_str:
                 blocked += 1
             else:
                 failed += 1
@@ -402,41 +417,41 @@ async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_dm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     if len(context.args) < 2:
-        await update.message.reply_text("⚠️ <b>Usage:</b> <code>/dm &lt;user_id&gt; &lt;message&gt;</code>", parse_mode="HTML")
+        await update.effective_message.reply_text("⚠️ <b>Usage:</b> <code>/dm &lt;user_id&gt; &lt;message&gt;</code>", parse_mode="HTML")
         return
 
     target_uid = context.args[0]
-    dm_text = update.message.text.split(None, 2)[2]
+    dm_text = update.effective_message.text.split(None, 2)[2]
     try:
         await context.bot.send_message(chat_id=int(target_uid), text=dm_text, parse_mode="HTML")
-        await update.message.reply_text(f"✅ Message sent to <code>{target_uid}</code>.", parse_mode="HTML")
+        await update.effective_message.reply_text(f"✅ Message sent to <code>{target_uid}</code>.", parse_mode="HTML")
     except Exception as e:
-        await update.message.reply_text(f"❌ Failed to send DM: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
+        await update.effective_message.reply_text(f"❌ Failed to send DM: <code>{html.escape(str(e))}</code>", parse_mode="HTML")
 
 
 async def admin_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     if not context.args:
-        await update.message.reply_text("⚠️ <b>Usage:</b> <code>/ban &lt;user_id&gt; [reason]</code>", parse_mode="HTML")
+        await update.effective_message.reply_text("⚠️ <b>Usage:</b> <code>/ban &lt;user_id&gt; [reason]</code>", parse_mode="HTML")
         return
 
     target_uid = context.args[0]
     reason = " ".join(context.args[1:]) if len(context.args) > 1 else "Violation of terms"
 
     if target_uid == str(ADMIN_ID):
-        await update.message.reply_text("❌ You cannot ban the Admin account!")
+        await update.effective_message.reply_text("❌ You cannot ban the Admin account!")
         return
 
     db = load_db()
     db["banned_users"][target_uid] = {"reason": reason, "banned_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     save_db(db)
-    await update.message.reply_text(f"🚫 <b>User Banned:</b> <code>{target_uid}</code>\n📝 <b>Reason:</b> {html.escape(reason)}", parse_mode="HTML")
+    await update.effective_message.reply_text(f"🚫 <b>User Banned:</b> <code>{target_uid}</code>\n📝 <b>Reason:</b> {html.escape(reason)}", parse_mode="HTML")
 
 
 async def admin_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     if not context.args:
-        await update.message.reply_text("⚠️ <b>Usage:</b> <code>/unban &lt;user_id&gt;</code>", parse_mode="HTML")
+        await update.effective_message.reply_text("⚠️ <b>Usage:</b> <code>/unban &lt;user_id&gt;</code>", parse_mode="HTML")
         return
 
     target_uid = context.args[0]
@@ -444,9 +459,9 @@ async def admin_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if target_uid in db.get("banned_users", {}):
         del db["banned_users"][target_uid]
         save_db(db)
-        await update.message.reply_text(f"✅ User <code>{target_uid}</code> unbanned.", parse_mode="HTML")
+        await update.effective_message.reply_text(f"✅ User <code>{target_uid}</code> unbanned.", parse_mode="HTML")
     else:
-        await update.message.reply_text(f"ℹ️ User <code>{target_uid}</code> is not in the ban list.", parse_mode="HTML")
+        await update.effective_message.reply_text(f"ℹ️ User <code>{target_uid}</code> is not in the ban list.", parse_mode="HTML")
 
 
 async def admin_banned_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -454,26 +469,26 @@ async def admin_banned_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = load_db()
     banned = db.get("banned_users", {})
     if not banned:
-        await update.message.reply_text("🟢 There are currently no banned users.", parse_mode="HTML")
+        await update.effective_message.reply_text("🟢 There are currently no banned users.", parse_mode="HTML")
         return
 
     banned_text = f"🚫 <b>BANNED USERS ({len(banned)}):</b>\n\n"
     for uid, info in banned.items():
         banned_text += f"• <code>{uid}</code> | Reason: {html.escape(info.get('reason'))} | 🕒 <code>{info.get('banned_at')}</code>\n"
-    await update.message.reply_text(banned_text, parse_mode="HTML")
+    await update.effective_message.reply_text(banned_text, parse_mode="HTML")
 
 
 async def admin_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     if not context.args:
-        await update.message.reply_text("⚠️ <b>Usage:</b> <code>/user &lt;user_id&gt;</code>", parse_mode="HTML")
+        await update.effective_message.reply_text("⚠️ <b>Usage:</b> <code>/user &lt;user_id&gt;</code>", parse_mode="HTML")
         return
 
     target_uid = context.args[0]
     db = load_db()
     user_data = db.get("users", {}).get(target_uid)
     if not user_data:
-        await update.message.reply_text(f"❌ User <code>{target_uid}</code> not found.", parse_mode="HTML")
+        await update.effective_message.reply_text(f"❌ User <code>{target_uid}</code> not found.", parse_mode="HTML")
         return
 
     is_user_banned = "🔴 YES" if target_uid in db.get("banned_users", {}) else "🟢 NO"
@@ -487,13 +502,13 @@ async def admin_user_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🕒 <b>Last Active:</b> <code>{user_data.get('last_active', 'N/A')}</code>\n"
         f"🚫 <b>Banned:</b> {is_user_banned}"
     )
-    await update.message.reply_text(info_text, parse_mode="HTML")
+    await update.effective_message.reply_text(info_text, parse_mode="HTML")
 
 
 async def admin_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     if not context.args or context.args[0].lower() not in ["on", "off"]:
-        await update.message.reply_text("⚠️ <b>Usage:</b> <code>/maintenance on</code> or <code>/maintenance off</code>", parse_mode="HTML")
+        await update.effective_message.reply_text("⚠️ <b>Usage:</b> <code>/maintenance on</code> or <code>/maintenance off</code>", parse_mode="HTML")
         return
 
     mode = context.args[0].lower() == "on"
@@ -501,7 +516,7 @@ async def admin_maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db["maintenance"] = mode
     save_db(db)
     status_str = "🔴 <b>ENABLED (ON)</b>." if mode else "🟢 <b>DISABLED (OFF)</b>."
-    await update.message.reply_text(f"🛠️ Maintenance mode is now {status_str}", parse_mode="HTML")
+    await update.effective_message.reply_text(f"🛠️ Maintenance mode is now {status_str}", parse_mode="HTML")
 
 
 # GLOBAL ERROR HANDLER
